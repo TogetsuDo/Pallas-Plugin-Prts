@@ -12,10 +12,49 @@ from .config import get_config
 from .corpus import CorpusError, CorpusStore, parse_pack_ids
 
 PLUGIN_ID = "prts_corpus"
+_STORE: CorpusStore | None = None
+_QUERY_SCOPE_HINTS = (
+    "剧情",
+    "世界观",
+    "台词",
+    "密录",
+    "时间线",
+    "年表",
+    "什么时候",
+    "何时",
+    "是什么",
+    "是谁",
+    "什么意思",
+    "是啥意思",
+    "哪里",
+    "哪儿",
+    "去哪",
+    "最后",
+    "结局",
+    "发生",
+    "为什么",
+    "怎么",
+    "介绍",
+    "查一下",
+    "查询",
+)
 
 
 def _store() -> CorpusStore:
-    return CorpusStore(Path(plugin_data_dir(PLUGIN_ID)))
+    global _STORE
+    if _STORE is None:
+        _STORE = CorpusStore(Path(plugin_data_dir(PLUGIN_ID)))
+    return _STORE
+
+
+def prts_scope_matcher(user_text: str) -> bool:
+    text = str(user_text or "").strip()
+    return bool(
+        text
+        and get_config().enabled
+        and any(hint in text for hint in _QUERY_SCOPE_HINTS)
+        and _store().contains_entity(text)
+    )
 
 
 def _not_ready(error: Exception) -> dict[str, Any]:
@@ -60,12 +99,15 @@ async def handle_search(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any
             key: [str(item).strip() for item in args.get(key, []) if str(item).strip()]
             for key in ("games", "resource_types", "character_names", "activity_names", "entity_names", "speakers")
         }
-        return await _search_with_query_fallback(
+        result = await _search_with_query_fallback(
             str(args.get("query") or "").strip(),
             packs=packs,
             limit=min(int(args.get("limit") or cfg.search_limit), cfg.search_limit),
             filters=filters,
         )
+        if result.get("count"):
+            result["activate"] = ["prts.read"]
+        return result
     except CorpusError as exc:
         return _not_ready(exc)
 
@@ -127,10 +169,11 @@ register_llm_tool(
         },
         "required": ["query"],
     },
-    domains={"prts", "knowledge", "arknights", "endfield"},
-    hints={"剧情", "世界观", "台词", "密录", "角色档案", "活动时间线", "泰拉年表", "终末地", "PRTS"},
+    domains={"prts", "arknights", "endfield"},
+    hints={"方舟剧情", "明日方舟世界观", "终末地剧情", "PRTS台词", "泰拉年表", "PRTS"},
     capabilities={"read_only"},
     handler=handle_search,
+    scope_matcher=prts_scope_matcher,
     max_execution_ms=60_000,
 )
 
@@ -151,10 +194,11 @@ register_llm_tool(
             "max_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
         },
     },
-    domains={"prts", "knowledge", "arknights", "endfield"},
-    hints={"原文", "引用", "逐字", "台词", "密录", "阅读资料"},
+    domains=set(),
+    hints={"方舟原文", "PRTS引用", "PRTS台词", "方舟密录"},
     capabilities={"read_only"},
     handler=handle_read,
+    visibility="deferred",
     max_execution_ms=30_000,
 )
 
@@ -170,8 +214,8 @@ register_llm_tool(
             "limit": {"type": "integer", "minimum": 1, "maximum": 10},
         },
     },
-    domains={"prts", "knowledge", "arknights"},
-    hints={"时间线", "年表", "发生时间", "活动顺序"},
+    domains={"prts", "arknights"},
+    hints={"泰拉年表", "方舟时间线", "PRTS时间线", "活动顺序"},
     capabilities={"read_only"},
     handler=handle_timeline,
     max_execution_ms=60_000,
