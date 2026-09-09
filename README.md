@@ -21,8 +21,12 @@ local/plugins/prts_corpus/
 然后重启 Bot。在控制台插件页调整 pack 或是否包含终末地，管理员发送：
 
 ```text
-PRTS更新
+PRTS更新 ak       # 明日方舟
+PRTS更新 ef       # 终末地
+PRTS更新 all      # 全部
 ```
+
+也支持 `PRTS更新 方舟`、`PRTS更新 终末地`、`PRTS更新 全部`，以及用逗号或空格组合范围；不带参数时按插件配置下载。
 
 ## 默认资料
 

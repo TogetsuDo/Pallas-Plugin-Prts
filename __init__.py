@@ -25,7 +25,7 @@ __plugin_meta__ = PluginMetadata(
     description="按需下载并检索 PRTS.chat 的明日方舟与终末地资料，为 LLM 提供带行号引用的原文检索。",
     usage=join_usage(
         usage_line("PRTS状态", "查看本地语料版本与已安装 pack"),
-        usage_line("PRTS更新", "下载当前 PRTS 语料（管理员）"),
+        usage_line("PRTS更新 [ak|ef|all]", "选择范围下载 PRTS 语料（管理员）"),
     ),
     type="application",
     homepage="https://github.com/HTian-qwq/prts-terrarchive",
@@ -82,7 +82,7 @@ __plugin_meta__ = PluginMetadata(
                 "trigger_condition": "PRTS更新 / PRTS同步",
                 "command_permission": "prts_corpus.sync",
                 "brief_des": "下载当前 PRTS 语料。",
-                "detail_des": "按插件配置下载用户选择的资料分区；语料不随插件代码分发。",
+                "detail_des": "可追加 ak、ef 或 all 选择明日方舟、终末地或全部资料；无参数时按插件配置下载。",
             },
         ],
     },
