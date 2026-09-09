@@ -6,7 +6,6 @@ from pallas.api.commands import (
     command_perm_row,
 )
 from pallas.api.metadata import (
-    PLUGIN_EXTRA_VERSION,
     PLUGIN_MENU_TEMPLATE,
     SCENE_BOTH,
     join_usage,
@@ -33,7 +32,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra={
         "help_tag": "tool",
-        "version": PLUGIN_EXTRA_VERSION,
+        "version": "0.1.1",
         "menu_template": PLUGIN_MENU_TEMPLATE,
         "reload_policy": "metadata",
         "command_permissions": command_perm_list(
