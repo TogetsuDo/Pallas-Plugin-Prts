@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,30 @@ def _not_ready(error: Exception) -> dict[str, Any]:
     }
 
 
+async def _search_with_query_fallback(
+    query: str,
+    *,
+    packs: list[str],
+    limit: int,
+    filters: dict[str, list[str]],
+) -> dict[str, Any]:
+    store = _store()
+    result = await asyncio.to_thread(store.search, query, pack_ids=packs, limit=limit, **filters)
+    if result.get("count"):
+        return result
+    terms = list(dict.fromkeys(re.findall(r"[\u3400-\u9fff]{2,}|[A-Za-z0-9_-]{2,}", query)))
+    relaxed = {key: filters[key] for key in ("games", "resource_types", "activity_names")}
+    for term in terms:
+        if term == query:
+            continue
+        fallback = await asyncio.to_thread(store.search, term, pack_ids=packs, limit=limit, **relaxed)
+        if fallback.get("count"):
+            fallback["query"] = query
+            fallback["matched_query"] = term
+            return fallback
+    return result
+
+
 async def handle_search(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any]:
     cfg = get_config()
     if not cfg.enabled:
@@ -35,12 +60,11 @@ async def handle_search(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any
             key: [str(item).strip() for item in args.get(key, []) if str(item).strip()]
             for key in ("games", "resource_types", "character_names", "activity_names", "entity_names", "speakers")
         }
-        return await asyncio.to_thread(
-            _store().search,
+        return await _search_with_query_fallback(
             str(args.get("query") or "").strip(),
-            pack_ids=packs,
+            packs=packs,
             limit=min(int(args.get("limit") or cfg.search_limit), cfg.search_limit),
-            **filters,
+            filters=filters,
         )
     except CorpusError as exc:
         return _not_ready(exc)
