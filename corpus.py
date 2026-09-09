@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unicodedata
 import urllib.error
@@ -279,6 +280,8 @@ class CorpusStore:
         self._shard_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._index_cache: dict[tuple[str, str], dict[str, list[int]]] = {}
         self._manifests: dict[str, dict[str, Any]] = {}
+        self._entity_names_key = ""
+        self._entity_names_cache: tuple[str, ...] = ()
 
     def status(self) -> dict[str, Any]:
         pointer = self._read_pointer()
@@ -321,6 +324,62 @@ class CorpusStore:
         except (OSError, json.JSONDecodeError) as exc:
             raise CorpusError(f"PRTS pack 清单损坏：{pack_id}: {exc}") from exc
         return data if isinstance(data, dict) else None
+
+    def entity_names(self, *, pack_ids: Iterable[str] = ("entities",)) -> tuple[str, ...]:
+        pointer = self._read_pointer()
+        if not pointer or not pointer.get("release_id"):
+            return ()
+        release_id = str(pointer["release_id"])
+        selected = tuple(pack_id for pack_id in pack_ids if pack_id in (pointer.get("packs") or []))
+        key = f"{release_id}:{','.join(selected)}"
+        if key == self._entity_names_key:
+            return self._entity_names_cache
+        names: set[str] = set()
+        for pack_id in selected:
+            manifest = self._read_manifest(pack_id, release_id)
+            catalog = manifest.get("document_catalog") if isinstance(manifest, dict) else None
+            if not isinstance(catalog, dict):
+                continue
+            catalog_path = _safe_asset_path(
+                self.root / release_id / pack_id,
+                str(catalog.get("path") or ""),
+            )
+            if not catalog_path.is_file():
+                continue
+            try:
+                with gzip.open(catalog_path, "rt", encoding="utf-8") as stream:
+                    for raw in stream:
+                        row = json.loads(raw)
+                        summary = row.get("document") if isinstance(row, dict) else None
+                        if not isinstance(summary, dict):
+                            continue
+                        for field_name in (
+                            "display_title",
+                            "character_name",
+                            "activity_name",
+                            "story_name",
+                            "collection_name",
+                        ):
+                            name = _normalize(summary.get(field_name))
+                            if len(name) >= 2:
+                                names.add(name)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise CorpusError(f"读取 PRTS 实体目录失败：{catalog_path}: {exc}") from exc
+        self._entity_names_key = key
+        self._entity_names_cache = tuple(sorted(names, key=lambda item: (-len(item), item)))
+        return self._entity_names_cache
+
+    def contains_entity(self, text: str, *, pack_ids: Iterable[str] = ("entities",)) -> bool:
+        query = _normalize(text)
+        if not query:
+            return False
+        for name in self.entity_names(pack_ids=pack_ids):
+            if name.isascii() and re.fullmatch(r"[a-z0-9][a-z0-9 ._-]*", name):
+                if re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", query):
+                    return True
+            elif name in query:
+                return True
+        return False
 
     def _load(self) -> None:
         pointer = self._read_pointer()

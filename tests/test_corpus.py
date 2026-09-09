@@ -84,3 +84,39 @@ def test_search_and_read_without_search_index(tmp_path: Path) -> None:
 
 def test_document_uid_is_stable() -> None:
     assert _document_uid("client:references:timeline") == _document_uid("client:references:timeline")
+
+
+def test_entity_match_uses_catalog_without_manual_names(tmp_path: Path) -> None:
+    data_dir = make_fixture(tmp_path)
+    entities_dir = data_dir / "releases" / "r1" / "entities"
+    write_gzip_jsonl(
+        entities_dir / "catalog/documents.jsonl.gz",
+        [
+            {
+                "document": {
+                    "display_title": "孤星",
+                    "document_id": "client:entities:lonestar",
+                }
+            },
+            {
+                "document": {
+                    "display_title": "克丽斯腾·莱特",
+                    "document_id": "client:entities:kirsten",
+                }
+            },
+        ],
+    )
+    (entities_dir / "pack-manifest.json").write_text(
+        json.dumps({"pack_id": "entities", "document_catalog": {"path": "catalog/documents.jsonl.gz"}}),
+        encoding="utf-8",
+    )
+    (data_dir / "releases/current.json").write_text(
+        json.dumps({"release_id": "r1", "data_version": "a" * 64, "packs": ["references", "entities"]}),
+        encoding="utf-8",
+    )
+
+    store = CorpusStore(data_dir)
+
+    assert store.contains_entity("孤星剧情发生在什么时候")
+    assert store.contains_entity("克丽斯腾·莱特最后去了哪里")
+    assert not store.contains_entity("蛊真人剧情怎么样")
