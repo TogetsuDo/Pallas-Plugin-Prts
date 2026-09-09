@@ -29,11 +29,16 @@ async def handle_status(ctx: PluginHandlerContext) -> None:
 
 async def handle_sync(ctx: PluginHandlerContext) -> None:
     cfg = get_config()
+    packs = parse_pack_ids(cfg.packs, include_endfield=cfg.include_endfield)
+    await ctx.bot.send(
+        ctx.event,
+        f"PRTS 语料开始更新，将下载 {len(packs)} 个 pack；完成后会再回复结果。",
+    )
     try:
         pointer = await asyncio.to_thread(
             sync_packs,
             Path(plugin_data_dir(PLUGIN_ID)),
-            parse_pack_ids(cfg.packs, include_endfield=cfg.include_endfield),
+            packs,
             timeout=cfg.download_timeout_sec,
         )
     except CorpusError as exc:
