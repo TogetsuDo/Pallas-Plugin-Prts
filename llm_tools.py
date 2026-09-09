@@ -131,6 +131,7 @@ register_llm_tool(
     hints={"剧情", "世界观", "台词", "密录", "角色档案", "活动时间线", "泰拉年表", "终末地", "PRTS"},
     capabilities={"read_only"},
     handler=handle_search,
+    max_execution_ms=60_000,
 )
 
 register_llm_tool(
@@ -154,6 +155,7 @@ register_llm_tool(
     hints={"原文", "引用", "逐字", "台词", "密录", "阅读资料"},
     capabilities={"read_only"},
     handler=handle_read,
+    max_execution_ms=30_000,
 )
 
 register_llm_tool(
@@ -172,4 +174,5 @@ register_llm_tool(
     hints={"时间线", "年表", "发生时间", "活动顺序"},
     capabilities={"read_only"},
     handler=handle_timeline,
+    max_execution_ms=60_000,
 )
