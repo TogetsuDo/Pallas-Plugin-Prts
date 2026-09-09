@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from pallas.api.paths import plugin_data_dir
+from pallas.api.platform import register_llm_tool
+
+from .config import get_config
+from .corpus import CorpusError, CorpusStore, parse_pack_ids
+
+PLUGIN_ID = "prts_corpus"
+
+
+def _store() -> CorpusStore:
+    return CorpusStore(Path(plugin_data_dir(PLUGIN_ID)))
+
+
+def _not_ready(error: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": str(error),
+        "result": {"hint": "请先使用 PRTS更新 下载语料。"},
+    }
+
+
+async def handle_search(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any]:
+    cfg = get_config()
+    if not cfg.enabled:
+        return {"ok": False, "error": "prts_disabled"}
+    try:
+        packs = parse_pack_ids(cfg.packs, include_endfield=cfg.include_endfield)
+        filters = {
+            key: [str(item).strip() for item in args.get(key, []) if str(item).strip()]
+            for key in ("games", "resource_types", "character_names", "activity_names", "entity_names", "speakers")
+        }
+        return await asyncio.to_thread(
+            _store().search,
+            str(args.get("query") or "").strip(),
+            pack_ids=packs,
+            limit=min(int(args.get("limit") or cfg.search_limit), cfg.search_limit),
+            **filters,
+        )
+    except CorpusError as exc:
+        return _not_ready(exc)
+
+
+async def handle_read(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any]:
+    cfg = get_config()
+    if not cfg.enabled:
+        return {"ok": False, "error": "prts_disabled"}
+    try:
+        return await asyncio.to_thread(
+            _store().read,
+            document_uid=str(args.get("document_uid") or ""),
+            document_id=str(args.get("document_id") or ""),
+            display_title=str(args.get("display_title") or ""),
+            source_ref=str(args.get("source_ref") or ""),
+            start_line=int(args.get("start_line") or 1),
+            end_line=int(args["end_line"]) if args.get("end_line") is not None else None,
+            max_lines=min(int(args.get("max_lines") or cfg.read_max_lines), cfg.read_max_lines),
+            max_chars=min(int(args.get("max_chars") or cfg.read_max_chars), cfg.read_max_chars),
+        )
+    except CorpusError as exc:
+        return _not_ready(exc)
+
+
+async def handle_timeline(args: dict[str, Any], _ctx: Any = None) -> dict[str, Any]:
+    cfg = get_config()
+    if not cfg.enabled:
+        return {"ok": False, "error": "prts_disabled"}
+    try:
+        query = str(args.get("query") or "").strip()
+        entity_names = [str(item).strip() for item in args.get("entity_names", []) if str(item).strip()]
+        if not query and entity_names:
+            query = entity_names[0]
+        return await asyncio.to_thread(
+            _store().search,
+            query,
+            pack_ids=["references"],
+            limit=min(int(args.get("limit") or cfg.search_limit), cfg.search_limit),
+        )
+    except CorpusError as exc:
+        return _not_ready(exc)
+
+
+register_llm_tool(
+    name="prts.search",
+    plugin_name=PLUGIN_ID,
+    description="检索本地 PRTS 方舟/终末地语料，返回资料标题、命中行和引用定位。语料未安装时不要编造结果。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "短实体名、台词片段、活动名或问题关键词"},
+            "games": {"type": "array", "items": {"type": "string", "enum": ["arknights", "endfield"]}},
+            "resource_types": {"type": "array", "items": {"type": "string"}},
+            "character_names": {"type": "array", "items": {"type": "string"}},
+            "activity_names": {"type": "array", "items": {"type": "string"}},
+            "entity_names": {"type": "array", "items": {"type": "string"}},
+            "speakers": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+        "required": ["query"],
+    },
+    domains={"prts", "arknights", "endfield"},
+    hints={"剧情", "世界观", "台词", "密录", "角色档案", "活动时间线", "泰拉年表", "终末地", "PRTS"},
+    capabilities={"read_only"},
+    handler=handle_search,
+)
+
+register_llm_tool(
+    name="prts.read",
+    plugin_name=PLUGIN_ID,
+    description="读取 PRTS 搜索结果对应的原文行，必须优先使用 prts.search 返回的 document_uid 或 source_ref。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "document_uid": {"type": "string"},
+            "document_id": {"type": "string"},
+            "display_title": {"type": "string"},
+            "source_ref": {"type": "string"},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+            "max_lines": {"type": "integer", "minimum": 1, "maximum": 200},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
+        },
+    },
+    domains={"prts", "arknights", "endfield"},
+    hints={"原文", "引用", "逐字", "台词", "密录", "阅读资料"},
+    capabilities={"read_only"},
+    handler=handle_read,
+)
+
+register_llm_tool(
+    name="prts.timeline",
+    plugin_name=PLUGIN_ID,
+    description="检索 PRTS 语料中的活动时间线与泰拉年表。时间线属于整理性资料，回答时应标注其来源性质。",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "entity_names": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+    },
+    domains={"prts", "arknights"},
+    hints={"时间线", "年表", "发生时间", "活动顺序"},
+    capabilities={"read_only"},
+    handler=handle_timeline,
+)
