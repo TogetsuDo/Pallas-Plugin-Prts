@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import base64
+import functools
 import gzip
 import hashlib
 import json
 import os
 import re
 import tempfile
+import threading
 import unicodedata
 import urllib.error
 import urllib.request
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 CURRENT_URL = "https://prts.chat/api/agent/data/releases/current"
 SITE_BASE_URL = "https://prts.chat/api/agent/data/releases"
@@ -136,6 +140,13 @@ def _safe_asset_path(base: Path, raw_path: str) -> Path:
     return base.joinpath(*relative.parts)
 
 
+def _safe_release_dir(data_dir: Path, release_id: str) -> Path:
+    raw = str(release_id or "")
+    if not raw or "\\" in raw or Path(raw).name != raw:
+        raise CorpusError("PRTS release_id 非法")
+    return _safe_asset_path(corpus_root(data_dir), raw)
+
+
 def _mirror_urls(current: dict[str, Any], pack_id: str, release_id: str, path: str) -> list[str]:
     urls: list[str] = []
     for mirror in current.get("mirrors", []):
@@ -153,11 +164,18 @@ def _mirror_urls(current: dict[str, Any], pack_id: str, release_id: str, path: s
     return list(dict.fromkeys(urls))
 
 
-def sync_packs(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> dict[str, Any]:
+def sync_packs(
+    data_dir: Path,
+    pack_ids: list[str],
+    *,
+    timeout: int = 120,
+    current_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     requested = [pack_id for pack_id in pack_ids if pack_id in ALLOWED_PACKS]
     if not requested:
         raise CorpusError("没有选择有效的 PRTS pack")
-    current_payload = _request_json(CURRENT_URL, timeout=timeout)
+    if current_payload is None:
+        current_payload = _request_json(CURRENT_URL, timeout=timeout)
     data = current_payload.get("data")
     if current_payload.get("code") != 200 or not isinstance(data, dict):
         raise CorpusError("PRTS current 响应无效")
@@ -165,6 +183,7 @@ def sync_packs(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> di
     data_version = str(data.get("data_version") or "")
     if not release_id or len(data_version) != 64:
         raise CorpusError("PRTS current 缺少 release_id 或 data_version")
+    _safe_release_dir(data_dir, release_id)
     release_manifest = _request_json(
         f"{SITE_BASE_URL}/{release_id}/release-manifest.json",
         timeout=timeout,
@@ -181,7 +200,7 @@ def sync_packs(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> di
         for item in release_manifest.get("packs", [])
         if isinstance(item, dict)
     }
-    release_dir = corpus_root(data_dir) / release_id
+    release_dir = _safe_release_dir(data_dir, release_id)
     for pack_id in requested:
         descriptor = descriptor_by_id.get(pack_id)
         if descriptor is None:
@@ -217,6 +236,99 @@ def sync_packs(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> di
     }
     _write_json(corpus_root(data_dir) / "current.json", pointer)
     return pointer
+
+
+_SYNC_LOCK = threading.Lock()
+
+
+def sync_packs_locked(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> dict[str, Any]:
+    """手动同步入口；锁在下载线程内持有，异步取消不会提前释放。"""
+    with _SYNC_LOCK:
+        return sync_packs(data_dir, pack_ids, timeout=timeout)
+
+
+def _read_pointer_file(data_dir: Path) -> dict[str, Any] | None:
+    path = corpus_root(data_dir) / "current.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _release_files_present(data_dir: Path, release_id: str, pack_ids: Iterable[str]) -> bool:
+    release_dir = _safe_release_dir(data_dir, release_id)
+    for pack_id in pack_ids:
+        manifest_path = release_dir / pack_id / "pack-manifest.json"
+        if not manifest_path.is_file():
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(manifest, dict):
+            return False
+        for asset in _asset_rows(manifest):
+            path = str(asset.get("path") or "")
+            if not path:
+                return False
+            asset_path = _safe_asset_path(release_dir / pack_id, path)
+            if not asset_path.is_file():
+                return False
+            size = int(asset.get("compressed_size") or 0)
+            if size > 0 and asset_path.stat().st_size != size:
+                return False
+    return True
+
+
+def auto_update_pack_scope(data_dir: Path, configured: Iterable[str]) -> list[str]:
+    pointer = _read_pointer_file(data_dir) or {}
+    installed = [str(pack) for pack in pointer.get("packs") or [] if pack in ALLOWED_PACKS]
+    ordered = [pack for pack in configured if pack in ALLOWED_PACKS] + installed
+    return list(dict.fromkeys(ordered))
+
+
+def auto_update_if_needed(data_dir: Path, pack_ids: list[str], *, timeout: int = 120) -> dict[str, Any]:
+    """自动检查：同版且本地文件齐全时跳过，否则按配置并保留已装 pack 同步。"""
+    with _SYNC_LOCK:
+        return _auto_update_if_needed(data_dir, pack_ids, timeout=timeout)
+
+
+def _auto_update_if_needed(data_dir: Path, pack_ids: list[str], *, timeout: int) -> dict[str, Any]:
+    desired = auto_update_pack_scope(data_dir, pack_ids)
+    if not desired:
+        raise CorpusError("没有选择有效的 PRTS pack")
+    current_payload = _request_json(CURRENT_URL, timeout=timeout)
+    data = current_payload.get("data")
+    if current_payload.get("code") != 200 or not isinstance(data, dict):
+        raise CorpusError("PRTS current 响应无效")
+    release_id = str(data.get("release_id") or "")
+    data_version = str(data.get("data_version") or "")
+    if not release_id or len(data_version) != 64:
+        raise CorpusError("PRTS current 缺少 release_id 或 data_version")
+    _safe_release_dir(data_dir, release_id)
+    local = _read_pointer_file(data_dir) or {}
+    local_release = str(local.get("release_id") or "")
+    local_version = str(local.get("data_version") or "")
+    if local_release and local_release == release_id and local_version != data_version:
+        raise CorpusError(f"PRTS release [{release_id}] 数据版本变化，拒绝原位覆盖，保留现有语料")
+    same_release = local_release == release_id and local_version == data_version
+    local_packs = {str(pack) for pack in local.get("packs") or []}
+    if (
+        same_release
+        and all(pack in local_packs for pack in desired)
+        and _release_files_present(data_dir, release_id, desired)
+    ):
+        return {
+            "updated": False,
+            "release_id": release_id,
+            "data_version": data_version,
+            "packs": desired,
+        }
+    pointer = sync_packs(data_dir, desired, timeout=timeout, current_payload=current_payload)
+    return {"updated": True, **pointer}
 
 
 def _normalize(value: Any) -> str:
@@ -268,11 +380,37 @@ def _line_text(line: dict[str, Any]) -> str:
     return f"{speaker}: {text}" if speaker else text
 
 
+def _serialized(method: Callable) -> Callable:
+    """以 search/read 实例锁串行化入口，避免并发线程混用 release 缓存与指针。"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _names_serialized(method: Callable) -> Callable:
+    """实体目录入口使用独立实例锁，不与 search/read 锁互相阻塞。"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._names_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class CorpusStore:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.root = corpus_root(data_dir)
+        self._lock = threading.RLock()
+        self._names_lock = threading.RLock()
         self._loaded_key = ""
+        self._release_id = ""
+        self._data_version = ""
         self._locations: dict[tuple[str, str], DocumentLocation] = {}
         self._by_id: dict[str, DocumentLocation] = {}
         self._by_uid: dict[str, DocumentLocation] = {}
@@ -325,13 +463,15 @@ class CorpusStore:
             raise CorpusError(f"PRTS pack 清单损坏：{pack_id}: {exc}") from exc
         return data if isinstance(data, dict) else None
 
+    @_names_serialized
     def entity_names(self, *, pack_ids: Iterable[str] = ("entities",)) -> tuple[str, ...]:
         pointer = self._read_pointer()
         if not pointer or not pointer.get("release_id"):
             return ()
         release_id = str(pointer["release_id"])
+        data_version = str(pointer.get("data_version") or "")
         selected = tuple(pack_id for pack_id in pack_ids if pack_id in (pointer.get("packs") or []))
-        key = f"{release_id}:{','.join(selected)}"
+        key = f"{release_id}:{data_version}:{','.join(selected)}"
         if key == self._entity_names_key:
             return self._entity_names_cache
         names: set[str] = set()
@@ -385,7 +525,9 @@ class CorpusStore:
         pointer = self._read_pointer()
         if not pointer or not pointer.get("release_id"):
             raise CorpusError("PRTS 语料尚未安装，请先发送 PRTS更新")
-        key = f"{pointer.get('release_id')}:{','.join(pointer.get('packs') or [])}"
+        release_id = str(pointer["release_id"])
+        data_version = str(pointer.get("data_version") or "")
+        key = f"{release_id}:{data_version}:{','.join(pointer.get('packs') or [])}"
         if key == self._loaded_key:
             return
         self._locations.clear()
@@ -395,7 +537,8 @@ class CorpusStore:
         self._shard_cache.clear()
         self._index_cache.clear()
         self._manifests.clear()
-        release_id = str(pointer["release_id"])
+        self._release_id = release_id
+        self._data_version = data_version
         for pack_id in pointer.get("packs", []):
             manifest = self._read_manifest(str(pack_id), release_id)
             if not manifest:
@@ -440,8 +583,8 @@ class CorpusStore:
         self._loaded_key = key
 
     def _release_dir(self, pack_id: str) -> Path:
-        pointer = self._read_pointer() or {}
-        return self.root / str(pointer.get("release_id") or "") / pack_id
+        release_id = self._release_id or str((self._read_pointer() or {}).get("release_id") or "")
+        return self.root / release_id / pack_id
 
     def _load_shard(self, location: DocumentLocation) -> list[dict[str, Any]]:
         key = (location.pack_id, location.shard_path)
@@ -547,6 +690,7 @@ class CorpusStore:
                 return False
         return True
 
+    @_serialized
     def search(self, query: str, *, pack_ids: list[str] | None = None, limit: int = 5, **filters: Any) -> dict[str, Any]:
         self._load()
         normalized_query = _normalize(query)
@@ -598,11 +742,12 @@ class CorpusStore:
         results.sort(key=lambda item: (0 if item["matches"] else 1, item["title"]))
         return {
             "query": query,
-            "data_version": str((self._read_pointer() or {}).get("data_version") or ""),
+            "data_version": self._data_version,
             "count": min(len(results), max(1, limit)),
             "items": results[: max(1, limit)],
         }
 
+    @_serialized
     def read(
         self,
         *,
@@ -664,7 +809,7 @@ class CorpusStore:
                 break
         title = str(location.summary.get("display_title") or location.document_id)
         return {
-            "data_version": str((self._read_pointer() or {}).get("data_version") or ""),
+            "data_version": self._data_version,
             "game": _game(location.summary),
             "title": title,
             "resource_type": _resource_type(location.summary),

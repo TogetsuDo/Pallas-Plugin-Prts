@@ -46,7 +46,29 @@ class Config(BaseModel, extra="ignore"):
         description="单个语料文件下载超时时间。",
         json_schema_extra={"label": "下载超时（秒）"},
     )
+    auto_update: bool = Field(
+        default=True,
+        description="是否定时检查并在有新 release 时自动下载 PRTS 语料。",
+        json_schema_extra={"label": "自动更新语料"},
+    )
+    update_interval_hours: int = Field(
+        default=24,
+        ge=1,
+        le=720,
+        description="自动检查更新的间隔（小时）。",
+        json_schema_extra={"label": "自动更新间隔（小时）"},
+    )
 
 
-plugin_webui = install_hot_reload_config(Config, config_module=__name__)
+def on_prts_config_reload(_config: Config) -> None:
+    from .startup import reschedule_auto_update_job
+
+    reschedule_auto_update_job()
+
+
+plugin_webui = install_hot_reload_config(
+    Config,
+    config_module=__name__,
+    on_reload=on_prts_config_reload,
+)
 get_config = plugin_webui.get
