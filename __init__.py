@@ -33,7 +33,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra={
         "help_tag": "tool",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "menu_template": PLUGIN_MENU_TEMPLATE,
         "reload_policy": "metadata",
         "command_permissions": command_perm_list(
