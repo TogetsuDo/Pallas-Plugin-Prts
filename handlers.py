@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from pallas.api.paths import plugin_data_dir
 
 from .config import get_config
-from .corpus import CorpusError, CorpusStore, parse_pack_ids, sync_packs
+from .corpus import CorpusError, CorpusStore, parse_pack_ids, sync_packs_locked
 
 if TYPE_CHECKING:
     from pallas.api.commands import PluginHandlerContext
@@ -64,7 +64,7 @@ async def handle_sync(ctx: PluginHandlerContext) -> None:
     )
     try:
         pointer = await asyncio.to_thread(
-            sync_packs,
+            sync_packs_locked,
             Path(plugin_data_dir(PLUGIN_ID)),
             packs,
             timeout=cfg.download_timeout_sec,

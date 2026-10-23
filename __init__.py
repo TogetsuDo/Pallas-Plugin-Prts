@@ -16,6 +16,7 @@ from pallas.api.metadata import (
 
 from . import commands as _commands  # noqa: F401
 from . import llm_tools as _llm_tools  # noqa: F401
+from . import startup as _startup  # noqa: F401
 from .config import Config
 
 PLUGIN_ID = "prts_corpus"
@@ -52,7 +53,10 @@ __plugin_meta__ = PluginMetadata(
                 chunks=[
                     {
                         "title": "语料安装",
-                        "content": "PRTS 语料需要管理员发送「PRTS更新」后才会下载；未安装时不要根据 PRTS 语料编造事实。",
+                        "content": (
+                            "PRTS 语料会随插件配置自动检查更新，也可由管理员发送「PRTS更新」手动下载；"
+                            "未安装时不要根据 PRTS 语料编造事实。"
+                        ),
                         "keywords": "PRTS,语料,更新,安装,下载",
                     },
                     {
